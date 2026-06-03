@@ -1,10 +1,10 @@
 settings:
-  name: "Strix: AI pentesting (local backend, no DinD)"
+  name: "Strix: AI pentesting"
   description: "Runs Strix (usestrix/strix), the AI-powered automated pentesting agent, entirely inside the Satori container via a custom unix_local runtime backend (from satoridev01/strix). Runs on Strix's OFFICIAL Kali sandbox image so the full toolset (agent-browser+chromium, nuclei, httpx, nmap, semgrep, ...) is present. Uses an OpenRouter LLM (Google Gemini 2.5 Flash by default). No Docker-in-Docker required."
   image: ghcr.io/usestrix/strix-sandbox:1.0.0
-  timeout: 1800
-  cpu: 2048
-  memory: 4096
+  timeout: 3600
+  cpu: 4096
+  memory: 8192
   files: true
   example: satori run satori://web/strix.yml -d HOST="https://example.com" -d MODE="quick" -d MODEL="openrouter/google/gemini-2.5-flash" -d OPENROUTER=$OPENROUTER --report --output
   redacted:
@@ -15,9 +15,7 @@ MODEL:
 
 strix:
   install:
-    # The official sandbox image already ships the full pentest toolchain
-    # (agent-browser+chromium, nuclei, httpx, nmap, ...) but NOT the strix CLI
-    # itself. Install it (PINNED so the shim's monkeypatches stay valid).
+    # The image already ships the full pentest toolchain but NOT the strix CLI itself. Install it pinned so the shim's monkeypatches stay valid.
     - pip install --break-system-packages --root-user-action=ignore -q "strix-agent==1.0.2" 2>&1 | tail -1
     # The local-backend fix — single file, pinned to tag v1.
     - curl -sL https://raw.githubusercontent.com/satoridev01/strix/v1/strix_local_backend.py -o /tmp/strix_local_backend.py
@@ -31,9 +29,11 @@ strix:
       export STRIX_SCAN_MODE="${{MODE}}"
       # Make the image npm-global tools (agent-browser) reachable
       export PATH="/home/pentester/.npm-global/bin:/home/pentester/go/bin:/home/pentester/.local/bin:$PATH"
-      cd /tmp && python3 /tmp/strix_local_backend.py 2>&1 | grep -v 'Provider List: https' | tail -40
+      # Run from the runner CWD (captured dir) so artifacts are retrievable with --files
+      echo "PWD=$(pwd) HOME=$HOME"
+      python3 /tmp/strix_local_backend.py 2>&1 | grep -v 'Provider List: https' | tail -40
       echo; echo "==================== ALL VULNERABILITIES (vulnerabilities.json) ===================="
-      VJSON=$(find /tmp/strix_runs -name vulnerabilities.json 2>/dev/null | head -1)
+      VJSON=$(find . -name vulnerabilities.json 2>/dev/null | head -1)
       if [ -n "$VJSON" ]; then
         echo "count: $(jq 'length' "$VJSON")"
         jq -r '.[] | "\n### [sev \(.severity // "?")] \(.title // .name // "untitled")  (\(.cvss_score // "?"))\n\(.description // "")"' "$VJSON" 2>/dev/null || cat "$VJSON"
@@ -41,7 +41,8 @@ strix:
         echo "no vulnerabilities.json written (0 findings filed)"
       fi
   # Strix headless exit codes: 0 = no vulns, 2 = vulns found, 1 = wrapper/crash.
-  # Fail the test only on a real crash; a finding (2) or clean (0) is a valid report.
+  # Security gate: pass only when clean (0); a finding (2) or crash (1) fails the test.
+  # (Switch to assertReturnCodeNot: 1 if you want findings to pass and only crashes to fail.)
   ran:
     setOutput: strix.run
     assertReturnCode: 0
