@@ -17,8 +17,8 @@ strix:
   install:
     # The image already ships the full pentest toolchain but NOT the strix CLI itself. Install it pinned so the shim's monkeypatches stay valid.
     - pip install --break-system-packages --root-user-action=ignore -q "strix-agent==1.0.2" 2>&1 | tail -1
-    # The local-backend fix — single file, pinned to tag v1.
-    - curl -sL https://raw.githubusercontent.com/satoridev01/strix/v1/strix_local_backend.py -o /tmp/strix_local_backend.py
+    # The local-backend fix — tracks main (repo is in active development; we control it).
+    - curl -sL https://raw.githubusercontent.com/satoridev01/strix/main/strix_local_backend.py -o /tmp/strix_local_backend.py
 
   run:
     - |
