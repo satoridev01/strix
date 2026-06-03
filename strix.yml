@@ -10,13 +10,10 @@ settings:
   redacted:
     - OPENROUTER
 
-MODEL:
-  - - "openrouter/google/gemini-2.5-flash"
-
 strix:
   install:
     # The image already ships the full pentest toolchain but NOT the strix CLI itself. Install it pinned so the shim's monkeypatches stay valid.
-    - pip install --break-system-packages --root-user-action=ignore -q "strix-agent==1.0.2" 2>&1 | tail -1
+    - pip install --break-system-packages --root-user-action=ignore -q "strix-agent==1.0.2"
     # The local-backend fix — tracks main (repo is in active development; we control it).
     - curl -sL https://raw.githubusercontent.com/satoridev01/strix/main/strix_local_backend.py -o /tmp/strix_local_backend.py
 
@@ -34,7 +31,7 @@ strix:
       # Capture the real strix exit code (0=clean, 2=vulns, 1=crash); the trailing
       # dump commands below must NOT clobber it, so we save it and exit with it.
       python3 /tmp/strix_local_backend.py > /tmp/strix_out.txt 2>&1; RC=$?
-      grep -v 'Provider List: https' /tmp/strix_out.txt | tail -40
+      grep -v 'Provider List: https' /tmp/strix_out.txt
       echo; echo "==================== ALL VULNERABILITIES (vulnerabilities.json) ===================="
       VJSON=$(find . -name vulnerabilities.json 2>/dev/null | head -1)
       if [ -n "$VJSON" ]; then
