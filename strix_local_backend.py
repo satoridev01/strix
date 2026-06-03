@@ -49,6 +49,23 @@ async def local_backend(*, image, manifest, exposed_ports):
     options = UnixLocalSandboxClientOptions(exposed_ports=tuple(exposed_ports))
     session = await client.create(options=options, manifest=manifest)
     await session.start()
+
+    # Optional audit trail: log every command the agent executes through the
+    # sandbox (proves tools actually run locally). Enable with STRIX_EXEC_LOG=path.
+    log_path = os.environ.get("STRIX_EXEC_LOG")
+    if log_path:
+        _orig_exec = session.exec
+
+        async def _logged_exec(*command, **kwargs):
+            try:
+                with open(log_path, "a") as fh:
+                    fh.write(" ".join(str(c) for c in command) + "\n")
+            except Exception:
+                pass
+            return await _orig_exec(*command, **kwargs)
+
+        session.exec = _logged_exec
+
     return client, session
 
 
