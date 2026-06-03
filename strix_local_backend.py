@@ -158,6 +158,40 @@ def install():
             UnixLocalSandboxSession._exec_internal = _logged_exec_internal
             UnixLocalSandboxSession._strix_exec_logged = True
 
+    # 5) Anthropic prompt caching. Strix never sets cache_control, so the large
+    #    static system prompt (~55K tokens) is billed at full input price on
+    #    EVERY turn — Claude runs cost ~15-20x more than they should. Anthropic
+    #    (incl. via OpenRouter) only caches when cache_control breakpoints are
+    #    present, so we use litellm's cache_control_injection_points to mark the
+    #    system message. Cache reads are 0.1x input price. Claude-only; other
+    #    providers (Gemini/OpenAI) cache automatically and are left untouched.
+    #    Disable with STRIX_ANTHROPIC_CACHE=0.
+    if os.environ.get("STRIX_ANTHROPIC_CACHE", "1").lower() not in ("0", "false", "no", "off", ""):
+        try:
+            import functools
+            import litellm
+
+            _injection = [{"location": "message", "role": "system"}]
+
+            def _with_cache(fn):
+                @functools.wraps(fn)
+                def wrapper(*a, **kw):
+                    model = str(kw.get("model", "")).lower()
+                    if ("anthropic" in model or "claude" in model) and \
+                            "cache_control_injection_points" not in kw:
+                        kw["cache_control_injection_points"] = _injection
+                    return fn(*a, **kw)
+                return wrapper
+
+            for _name in ("acompletion", "completion"):
+                _orig = getattr(litellm, _name, None)
+                if _orig is not None and not getattr(_orig, "_strix_cache_wrapped", False):
+                    _wrapped = _with_cache(_orig)
+                    _wrapped._strix_cache_wrapped = True
+                    setattr(litellm, _name, _wrapped)
+        except Exception:
+            pass
+
     os.environ["STRIX_RUNTIME_BACKEND"] = "local"
 
 
