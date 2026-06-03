@@ -1,36 +1,26 @@
 settings:
   name: "Strix: AI pentesting (local backend, no DinD)"
-  description: "Runs Strix (usestrix/strix), the AI-powered automated pentesting agent, entirely inside the Satori container via a custom unix_local runtime backend cloned from satoridev01/strix. Uses an OpenRouter LLM (Google Gemini 2.5 Flash by default). No Docker-in-Docker required."
-  image: python
+  description: "Runs Strix (usestrix/strix), the AI-powered automated pentesting agent, entirely inside the Satori container via a custom unix_local runtime backend (from satoridev01/strix). Runs on Strix's OFFICIAL Kali sandbox image so the full toolset (agent-browser+chromium, nuclei, httpx, nmap, semgrep, ...) is present. Uses an OpenRouter LLM (Google Gemini 2.5 Flash by default). No Docker-in-Docker required."
+  image: ghcr.io/usestrix/strix-sandbox:1.0.0
   timeout: 1800
   cpu: 2048
   memory: 4096
-  author:
-    - https://github.com/satoridev01
-  gallery:
-    - https://files.catbox.moe/5wp866.png
-  example: satori run satori://web/strix.yml -d HOST="https://example.com" -d MODEL="openrouter/google/gemini-2.5-flash" -d OPENROUTER=$OPENROUTER --report --output
+  files: true
+  example: satori run satori://web/strix.yml -d HOST="https://example.com" -d MODE="quick" -d MODEL="openrouter/google/gemini-2.5-flash" -d OPENROUTER=$OPENROUTER --report --output
   redacted:
     - OPENROUTER
 
 MODEL:
   - - "openrouter/google/gemini-2.5-flash"
 
-SCAN_MODE:
-  - - "quick"
-
 strix:
   install:
-    - export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -qy nmap dnsutils whois curl git unzip jq ca-certificates >/dev/null 2>&1
-    # Strix itself — PINNED so the in-container shim's monkeypatches stay valid.
+    # The official sandbox image already ships the full pentest toolchain
+    # (agent-browser+chromium, nuclei, httpx, nmap, ...) but NOT the strix CLI
+    # itself. Install it (PINNED so the shim's monkeypatches stay valid).
     - pip install --break-system-packages --root-user-action=ignore -q "strix-agent==1.0.2" 2>&1 | tail -1
-    # ProjectDiscovery httpx — the recon tool Strix expects (overrides the
-    # unrelated python `httpx` CLI that ships as a dependency).
-    - curl -sL https://api.github.com/repos/projectdiscovery/httpx/releases/latest | jq -r '.assets[].browser_download_url' | grep 'linux_amd64.zip$' | head -1 | xargs -r curl -sL -o /tmp/httpx.zip && unzip -o -q /tmp/httpx.zip -d /usr/local/bin httpx && chmod +x /usr/local/bin/httpx
-    # nuclei + templates (best-effort)
-    - curl -sL https://api.github.com/repos/projectdiscovery/nuclei/releases/latest | jq -r '.assets[].browser_download_url' | grep 'linux_amd64.zip$' | head -1 | xargs -r curl -sL -o /tmp/nuclei.zip && unzip -o -q /tmp/nuclei.zip -d /usr/local/bin nuclei && chmod +x /usr/local/bin/nuclei && timeout 120 nuclei -silent -update-templates >/dev/null 2>&1 || true
-    # The local-backend fix — PINNED to tag v1 (not floating main).
-    - rm -rf /tmp/strix-local && git clone --quiet --depth 1 --branch v1 https://github.com/satoridev01/strix /tmp/strix-local
+    # The local-backend fix — single file, pinned to tag v1.
+    - curl -sL https://raw.githubusercontent.com/satoridev01/strix/v1/strix_local_backend.py -o /tmp/strix_local_backend.py
 
   run:
     - |
@@ -38,10 +28,20 @@ strix:
       export LLM_API_KEY="${{OPENROUTER}}"
       export STRIX_TELEMETRY=0
       export STRIX_TARGET="${{HOST}}"
-      export STRIX_SCAN_MODE="${{SCAN_MODE}}"
-      cd /tmp/strix-local && python3 strix_local_backend.py 2>&1 | grep -v 'Provider List: https' | tail -200
+      export STRIX_SCAN_MODE="${{MODE}}"
+      # Make the image npm-global tools (agent-browser) reachable
+      export PATH="/home/pentester/.npm-global/bin:/home/pentester/go/bin:/home/pentester/.local/bin:$PATH"
+      cd /tmp && python3 /tmp/strix_local_backend.py 2>&1 | grep -v 'Provider List: https' | tail -40
+      echo; echo "==================== ALL VULNERABILITIES (vulnerabilities.json) ===================="
+      VJSON=$(find /tmp/strix_runs -name vulnerabilities.json 2>/dev/null | head -1)
+      if [ -n "$VJSON" ]; then
+        echo "count: $(jq 'length' "$VJSON")"
+        jq -r '.[] | "\n### [sev \(.severity // "?")] \(.title // .name // "untitled")  (\(.cvss_score // "?"))\n\(.description // "")"' "$VJSON" 2>/dev/null || cat "$VJSON"
+      else
+        echo "no vulnerabilities.json written (0 findings filed)"
+      fi
   # Strix headless exit codes: 0 = no vulns, 2 = vulns found, 1 = wrapper/crash.
   # Fail the test only on a real crash; a finding (2) or clean (0) is a valid report.
   ran:
     setOutput: strix.run
-    assertReturnCodeNot: 1
+    assertReturnCode: 0
