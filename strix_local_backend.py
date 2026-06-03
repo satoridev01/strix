@@ -171,7 +171,12 @@ def install():
             import functools
             import litellm
 
-            _injection = [{"location": "message", "role": "system"}]
+            # Two breakpoints: the static system prompt (~55K) AND the last
+            # message, so the growing conversation prefix also caches turn-to-turn.
+            _injection = [
+                {"location": "message", "role": "system"},
+                {"location": "message", "index": -1},
+            ]
 
             def _with_cache(fn):
                 @functools.wraps(fn)
