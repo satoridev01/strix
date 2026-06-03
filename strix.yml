@@ -29,9 +29,12 @@ strix:
       export STRIX_SCAN_MODE="${{MODE}}"
       # Make the image npm-global tools (agent-browser) reachable
       export PATH="/home/pentester/.npm-global/bin:/home/pentester/go/bin:/home/pentester/.local/bin:$PATH"
-      # Run from the runner CWD (captured dir) so artifacts are retrievable with --files
+      # Run from the runner CWD (captured dir) so artifacts are retrievable with --files.
       echo "PWD=$(pwd) HOME=$HOME"
-      python3 /tmp/strix_local_backend.py 2>&1 | grep -v 'Provider List: https' | tail -40
+      # Capture Strix's real exit code (0=clean, 2=vulns, 1=crash); the trailing
+      # dump commands below must NOT clobber it, so we save it and exit with it.
+      python3 /tmp/strix_local_backend.py > /tmp/strix_out.txt 2>&1; RC=$?
+      grep -v 'Provider List: https' /tmp/strix_out.txt | tail -40
       echo; echo "==================== ALL VULNERABILITIES (vulnerabilities.json) ===================="
       VJSON=$(find . -name vulnerabilities.json 2>/dev/null | head -1)
       if [ -n "$VJSON" ]; then
@@ -40,9 +43,10 @@ strix:
       else
         echo "no vulnerabilities.json written (0 findings filed)"
       fi
+      echo "[gate] strix exit code: $RC"
+      exit $RC
   # Strix headless exit codes: 0 = no vulns, 2 = vulns found, 1 = wrapper/crash.
-  # Security gate: pass only when clean (0); a finding (2) or crash (1) fails the test.
-  # (Switch to assertReturnCodeNot: 1 if you want findings to pass and only crashes to fail.)
+  # Security gate: pass ONLY when clean (0); a finding (2) or crash (1) fails the test.
   ran:
     setOutput: strix.run
     assertReturnCode: 0
