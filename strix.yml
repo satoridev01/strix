@@ -21,12 +21,16 @@ SCAN_MODE:
 
 strix:
   install:
-    # Pentest tooling the agent drives (extend as needed)
-    - export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -qy nmap dnsutils whois curl iputils-ping git >/dev/null 2>&1
-    # Strix itself
-    - pip install --break-system-packages --root-user-action=ignore -q strix-agent 2>&1 | tail -1
-    # The local-backend fix (clones alongside strix-agent and applies in-container)
-    - rm -rf /tmp/strix-local && git clone --depth 1 https://github.com/satoridev01/strix /tmp/strix-local >/dev/null 2>&1
+    - export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -qy nmap dnsutils whois curl git unzip jq ca-certificates >/dev/null 2>&1
+    # Strix itself — PINNED so the in-container shim's monkeypatches stay valid.
+    - pip install --break-system-packages --root-user-action=ignore -q "strix-agent==1.0.2" 2>&1 | tail -1
+    # ProjectDiscovery httpx — the recon tool Strix expects (overrides the
+    # unrelated python `httpx` CLI that ships as a dependency).
+    - curl -sL https://api.github.com/repos/projectdiscovery/httpx/releases/latest | jq -r '.assets[].browser_download_url' | grep 'linux_amd64.zip$' | head -1 | xargs -r curl -sL -o /tmp/httpx.zip && unzip -o -q /tmp/httpx.zip -d /usr/local/bin httpx && chmod +x /usr/local/bin/httpx
+    # nuclei + templates (best-effort)
+    - curl -sL https://api.github.com/repos/projectdiscovery/nuclei/releases/latest | jq -r '.assets[].browser_download_url' | grep 'linux_amd64.zip$' | head -1 | xargs -r curl -sL -o /tmp/nuclei.zip && unzip -o -q /tmp/nuclei.zip -d /usr/local/bin nuclei && chmod +x /usr/local/bin/nuclei && timeout 120 nuclei -silent -update-templates >/dev/null 2>&1 || true
+    # The local-backend fix — PINNED to tag v1 (not floating main).
+    - rm -rf /tmp/strix-local && git clone --quiet --depth 1 --branch v1 https://github.com/satoridev01/strix /tmp/strix-local
 
   run:
     - |
@@ -35,8 +39,9 @@ strix:
       export STRIX_TELEMETRY=0
       export STRIX_TARGET="${{HOST}}"
       export STRIX_SCAN_MODE="${{SCAN_MODE}}"
-      cd /tmp/strix-local && python3 strix_local_backend.py 2>&1 | tail -200
-  # Strix headless: exit 0 = no vulnerabilities, 2 = vulnerabilities found
+      cd /tmp/strix-local && python3 strix_local_backend.py 2>&1 | grep -v 'Provider List: https' | tail -200
+  # Strix headless exit codes: 0 = no vulns, 2 = vulns found, 1 = wrapper/crash.
+  # Fail the test only on a real crash; a finding (2) or clean (0) is a valid report.
   ran:
     setOutput: strix.run
     assertReturnCodeNot: 1

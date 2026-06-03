@@ -10,6 +10,7 @@ stubs the in-container Caido proxy sidecar (which doesn't exist locally).
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import sys
 import traceback
@@ -58,18 +59,78 @@ def _main_module():
     return importlib.import_module("strix.interface.main")
 
 
+class IncompatibleStrixError(RuntimeError):
+    """Raised when this shim's assumptions no longer hold against the installed
+    strix-agent / openai-agents. Fail LOUD instead of silently no-op'ing a
+    monkeypatch (which would otherwise resurface as a confusing Docker error)."""
+
+
+def _versions():
+    import importlib.metadata as md
+
+    def v(name):
+        try:
+            return md.version(name)
+        except Exception:
+            return "?"
+
+    return v("strix-agent"), v("openai-agents")
+
+
+def _require(cond, msg):
+    if not cond:
+        sv, av = _versions()
+        raise IncompatibleStrixError(
+            f"{msg} (strix-agent={sv}, openai-agents={av}). "
+            "The local-backend shim is pinned to these internals; update "
+            "satoridev01/strix to match the installed versions."
+        )
+
+
+def _quiet_litellm():
+    # Strix retries failed model calls; on each failure LiteLLM dumps a noisy
+    # "Provider List: https://docs.litellm.ai/..." banner to stdout. Silence it.
+    try:
+        import litellm
+
+        litellm.suppress_debug_info = True
+        litellm.set_verbose = False
+    except Exception:
+        pass
+    for name in ("LiteLLM", "litellm"):
+        try:
+            logging.getLogger(name).setLevel(logging.ERROR)
+        except Exception:
+            pass
+
+
 def install():
+    sv, av = _versions()
+    print(f"[shim] strix-agent={sv} openai-agents={av} -> backend=local", flush=True)
+
+    _quiet_litellm()
+
+    # 0) the SDK must ship the unix_local (subprocess) sandbox we build on
+    try:
+        import agents.sandbox.sandboxes.unix_local  # noqa: F401
+    except Exception as e:  # pragma: no cover
+        _require(False, f"openai-agents has no unix_local sandbox ({e!r})")
+
     # 1) register the local backend
     from strix.runtime.backends import register_backend
     register_backend("local", local_backend)
 
-    # 2) neutralize the Docker preflight in the CLI entrypoint
+    # 2) neutralize the Docker preflight in the CLI entrypoint — assert the
+    #    patch targets exist so an upstream rename fails here, not mid-scan.
     M = _main_module()
+    _require(hasattr(M, "check_docker_installed"), "main.check_docker_installed missing")
+    _require(hasattr(M, "pull_docker_image"), "main.pull_docker_image missing")
     M.check_docker_installed = lambda *a, **k: None
     M.pull_docker_image = lambda *a, **k: None
 
     # 3) stub the in-container Caido sidecar bootstrap
     import strix.runtime.session_manager as SM
+    _require(hasattr(SM, "bootstrap_caido"), "session_manager.bootstrap_caido missing")
 
     async def _no_caido(*a, **k):
         return None
