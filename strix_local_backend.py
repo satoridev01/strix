@@ -49,23 +49,6 @@ async def local_backend(*, image, manifest, exposed_ports):
     options = UnixLocalSandboxClientOptions(exposed_ports=tuple(exposed_ports))
     session = await client.create(options=options, manifest=manifest)
     await session.start()
-
-    # Optional audit trail: log every command the agent executes through the
-    # sandbox (proves tools actually run locally). Enable with STRIX_EXEC_LOG=path.
-    log_path = os.environ.get("STRIX_EXEC_LOG")
-    if log_path:
-        _orig_exec = session.exec
-
-        async def _logged_exec(*command, **kwargs):
-            try:
-                with open(log_path, "a") as fh:
-                    fh.write(" ".join(str(c) for c in command) + "\n")
-            except Exception:
-                pass
-            return await _orig_exec(*command, **kwargs)
-
-        session.exec = _logged_exec
-
     return client, session
 
 
@@ -153,6 +136,27 @@ def install():
         return None
 
     SM.bootstrap_caido = _no_caido
+
+    # 4) optional audit trail — log every command the agent runs through the
+    #    sandbox. _exec_internal is the chokepoint all tool execution funnels
+    #    through, so patch it at the class level. Enable with STRIX_EXEC_LOG=path.
+    log_path = os.environ.get("STRIX_EXEC_LOG")
+    if log_path:
+        from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxSession
+
+        if not getattr(UnixLocalSandboxSession, "_strix_exec_logged", False):
+            _orig_exec_internal = UnixLocalSandboxSession._exec_internal
+
+            async def _logged_exec_internal(self, *command, **kwargs):
+                try:
+                    with open(log_path, "a") as fh:
+                        fh.write(" ".join(str(c) for c in command) + "\n")
+                except Exception:
+                    pass
+                return await _orig_exec_internal(self, *command, **kwargs)
+
+            UnixLocalSandboxSession._exec_internal = _logged_exec_internal
+            UnixLocalSandboxSession._strix_exec_logged = True
 
     os.environ["STRIX_RUNTIME_BACKEND"] = "local"
 
