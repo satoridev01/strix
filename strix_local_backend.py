@@ -145,10 +145,18 @@ def main():
     M = _main_module()
     # Target + scan mode come from env (set by the Satori playbook); any extra
     # raw strix flags can be passed via STRIX_EXTRA_ARGS (space-separated).
-    host = os.environ.get("STRIX_TARGET", "")
-    scan_mode = os.environ.get("STRIX_SCAN_MODE", "quick")
-    extra = os.environ.get("STRIX_EXTRA_ARGS", "").split()
-    sys.argv = ["strix", "-n", "--scan-mode", scan_mode, "--target", host, *extra]
+    host = os.environ.get("STRIX_TARGET", "").strip()
+    if not host:
+        print("[shim] ERROR: STRIX_TARGET is empty — pass -d HOST=...", flush=True)
+        return 1
+    argv = ["strix", "-n", "--target", host]
+    # Empty/unset scan mode → omit the flag so strix uses its own default (deep),
+    # rather than passing --scan-mode "" (which would error).
+    scan_mode = os.environ.get("STRIX_SCAN_MODE", "").strip()
+    if scan_mode:
+        argv += ["--scan-mode", scan_mode]
+    argv += os.environ.get("STRIX_EXTRA_ARGS", "").split()
+    sys.argv = argv
     try:
         M.main()
     except SystemExit as e:
