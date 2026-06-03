@@ -31,7 +31,7 @@ strix:
       export PATH="/home/pentester/.npm-global/bin:/home/pentester/go/bin:/home/pentester/.local/bin:$PATH"
       # Run from the runner CWD (captured dir) so artifacts are retrievable with --files.
       echo "PWD=$(pwd) HOME=$HOME"
-      # Capture Strix's real exit code (0=clean, 2=vulns, 1=crash); the trailing
+      # Capture the real strix exit code (0=clean, 2=vulns, 1=crash); the trailing
       # dump commands below must NOT clobber it, so we save it and exit with it.
       python3 /tmp/strix_local_backend.py > /tmp/strix_out.txt 2>&1; RC=$?
       grep -v 'Provider List: https' /tmp/strix_out.txt | tail -40
