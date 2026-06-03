@@ -1,0 +1,42 @@
+settings:
+  name: "Strix: AI pentesting (local backend, no DinD)"
+  description: "Runs Strix (usestrix/strix), the AI-powered automated pentesting agent, entirely inside the Satori container via a custom unix_local runtime backend cloned from satoridev01/strix. Uses an OpenRouter LLM (Google Gemini 2.5 Flash by default). No Docker-in-Docker required."
+  image: python
+  timeout: 1800
+  cpu: 2048
+  memory: 4096
+  author:
+    - https://github.com/satoridev01
+  gallery:
+    - https://files.catbox.moe/5wp866.png
+  example: satori run satori://web/strix.yml -d HOST="https://example.com" -d MODEL="openrouter/google/gemini-2.5-flash" -d OPENROUTER=$OPENROUTER --report --output
+  redacted:
+    - OPENROUTER
+
+MODEL:
+  - - "openrouter/google/gemini-2.5-flash"
+
+SCAN_MODE:
+  - - "quick"
+
+strix:
+  install:
+    # Pentest tooling the agent drives (extend as needed)
+    - export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; apt-get install -qy nmap dnsutils whois curl iputils-ping git >/dev/null 2>&1
+    # Strix itself
+    - pip install --break-system-packages --root-user-action=ignore -q strix-agent 2>&1 | tail -1
+    # The local-backend fix (clones alongside strix-agent and applies in-container)
+    - rm -rf /tmp/strix-local && git clone --depth 1 https://github.com/satoridev01/strix /tmp/strix-local >/dev/null 2>&1
+
+  run:
+    - |
+      export STRIX_LLM="${{MODEL}}"
+      export LLM_API_KEY="${{OPENROUTER}}"
+      export STRIX_TELEMETRY=0
+      export STRIX_TARGET="${{HOST}}"
+      export STRIX_SCAN_MODE="${{SCAN_MODE}}"
+      cd /tmp/strix-local && python3 strix_local_backend.py 2>&1 | tail -200
+  # Strix headless: exit 0 = no vulnerabilities, 2 = vulnerabilities found
+  ran:
+    setOutput: strix.run
+    assertReturnCodeNot: 1
