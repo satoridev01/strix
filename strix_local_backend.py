@@ -209,7 +209,12 @@ def main():
     if not host:
         print("[shim] ERROR: STRIX_TARGET is empty — pass -d HOST=...", flush=True)
         return 1
-    argv = ["strix", "-n", "--target", host]
+    # STRIX_TARGET may contain newline-separated domains (multi-target scans); each
+    # becomes its own --target flag so Strix evaluates them in parallel.
+    targets = [t.strip() for t in host.splitlines() if t.strip()]
+    argv = ["strix", "-n"]
+    for t in targets:
+        argv += ["--target", t]
     # Empty/unset scan mode → omit the flag so strix uses its own default (deep),
     # rather than passing --scan-mode "" (which would error).
     scan_mode = os.environ.get("STRIX_SCAN_MODE", "").strip()
