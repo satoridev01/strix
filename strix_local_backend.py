@@ -104,6 +104,49 @@ def _quiet_litellm():
             pass
 
 
+def retry_midstream_cuts():
+    """Make a model call that dies mid-response retryable.
+
+    The SDK retries a streamed model call only while nothing but `response.created` / `in_progress` has
+    reached the agent loop: once text is out, a failure is final and ends the whole pentest. A provider
+    that drops mid-response is reported by OpenRouter in-band, after the first token, where it cannot
+    switch providers; one such cut threw away a 41-minute scan. So each response is held back until it is
+    complete: a cut then happens before anything was emitted, Strix's own retry settings ask again, and
+    OpenRouter routes the new request to a provider that is up. The loop reads the finished response,
+    never the deltas. Disable with STRIX_ATOMIC_STREAM=0.
+    """
+    if os.environ.get("STRIX_ATOMIC_STREAM", "1").lower() in ("0", "false", "no", "off", ""):
+        return
+    import functools
+
+    try:
+        from agents.extensions.models.litellm_model import LitellmModel
+    except Exception as e:
+        print(f"[shim] model streams not held until complete: {e!r}", flush=True)
+        return
+    _require(hasattr(LitellmModel, "stream_response"), "LitellmModel.stream_response missing")
+    stream_response = LitellmModel.stream_response
+    if getattr(stream_response, "_strix_atomic", False):
+        return
+
+    @functools.wraps(stream_response)
+    async def whole_response(self, *args, **kwargs):
+        try:
+            events = [event async for event in stream_response(self, *args, **kwargs)]
+        except Exception as e:
+            print(
+                f"[shim] model call cut before it finished ({type(e).__name__}); "
+                "the retry settings decide whether it is asked again",
+                flush=True,
+            )
+            raise
+        for event in events:
+            yield event
+
+    whole_response._strix_atomic = True
+    LitellmModel.stream_response = whole_response
+
+
 def install():
     sv, av = _versions()
     print(f"[shim] strix-agent={sv} openai-agents={av} -> backend=local", flush=True)
@@ -196,6 +239,9 @@ def install():
                     setattr(litellm, _name, _wrapped)
         except Exception:
             pass
+
+    # 6) A model call cut mid-response is retried (see retry_midstream_cuts).
+    retry_midstream_cuts()
 
     os.environ["STRIX_RUNTIME_BACKEND"] = "local"
 
