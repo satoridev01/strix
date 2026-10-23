@@ -13,6 +13,7 @@ import importlib
 import logging
 import os
 import sys
+import time
 import traceback
 
 _PROXY_KEYS = (
@@ -147,6 +148,148 @@ def retry_midstream_cuts():
     LitellmModel.stream_response = whole_response
 
 
+# Root-agent turns from which it is told they are running out. Healthy roots end by turn 440 (p99 395);
+# every root that reached the cap of 500 had never called finish_scan.
+_TURN_WARNINGS = (450, 475)
+
+_CLOSE = (
+    "say in the methodology what was not covered, "
+    "and do not mention turns, budget, agents or tooling in the report"
+)
+# Short and imperative on purpose: a longer, generic note had the production model go on exploring.
+_NOTES = {
+    ("first", False): (
+        "Turn budget: {left} turns left, then this scan is cut off and nothing you have not reported is kept. "
+        "No sub-agent is running. Stop exploring and call finish_scan now with your report: " + _CLOSE + "."
+    ),
+    ("first", True): (
+        "Turn budget: {left} turns left, then this scan is cut off and nothing you have not reported is kept. "
+        "Still running: {running}. Stop exploring. Send each one a message to file its findings and finish "
+        "(send_message_to_agent), wait for them (wait_for_message), then call finish_scan with your report: "
+        + _CLOSE + "."
+    ),
+    ("final", False): (
+        "FINAL WARNING: {left} turns left. No sub-agent is running. "
+        "Your next call must be finish_scan; " + _CLOSE + "."
+    ),
+    ("final", True): (
+        "FINAL WARNING: {left} turns left. Still running: {running}. "
+        "Stop each one with stop_agent now, then call finish_scan; " + _CLOSE + "."
+    ),
+}
+
+# RiskPoint stops an ACTIVE run at 6 h and keeps nothing from a run stopped that way, so the root is told to
+# close an hour before.
+_CLOCK_WARNING_SECONDS = 5 * 60 * 60
+_CLOCK_NOTES = {
+    False: "Time budget: this scan is stopped within the hour and nothing you have not reported is kept. "
+    "No sub-agent is running. Stop exploring and call finish_scan now with your report: " + _CLOSE + ".",
+    True: "Time budget: this scan is stopped within the hour and nothing you have not reported is kept. "
+    "Still running: {running}. Stop each one with stop_agent now, then call finish_scan; " + _CLOSE + ".",
+}
+
+_turn_warnings = {"sent": False}
+
+
+def _running_sub_agents(context):
+    """The sub-agents finish_scan would refuse to leave behind, as 'name (id)'; None when the graph is unreadable."""
+    try:
+        coordinator, root = context["coordinator"], context["agent_id"]
+        return [
+            f"{str(coordinator.names.get(a, a))[:40]} ({a})".replace("\n", " ")
+            for a, status in coordinator.statuses.items()
+            if a != root and status in ("running", "waiting")
+        ]
+    except Exception:
+        return None
+
+
+def warn_root_before_turn_cap():
+    """Tell the root agent its turns are running out, so it closes the scan instead of dying with it.
+
+    Only the root's MaxTurnsExceeded ends the pentest, and in every run that hit it the root had not called
+    finish_scan. From its turn 450, and again from 475, each model call the root makes carries a note with the
+    turns left and the one thing to do, which depends on whether sub-agents are still running; it rides on that
+    call only and never enters the agent's history. After 5 h the root gets the same kind of note, to close
+    before RiskPoint stops the run at 6 h. Turns are counted over the whole run of the root, so a
+    forced continuation does not silence the note. A scan that was warned and then ended with no finding is
+    reported as incomplete (incomplete_after_warning), not clean. Disable with STRIX_TURN_WARNINGS=0.
+    """
+    if os.environ.get("STRIX_TURN_WARNINGS", "1").lower() in ("0", "false", "no", "off", ""):
+        return
+    import functools
+
+    try:
+        from agents.run_config import ModelInputData, RunConfig
+        from strix.core.inputs import DEFAULT_MAX_TURNS
+    except Exception as e:
+        print(f"[shim] root agent not warned before its turn cap: {e!r}", flush=True)
+        return
+    first, last = _TURN_WARNINGS
+    _require(
+        "call_model_input_filter" in RunConfig.__dataclass_fields__,
+        "RunConfig.call_model_input_filter missing",
+    )
+    _require(DEFAULT_MAX_TURNS > last, f"turn cap {DEFAULT_MAX_TURNS} is not above the warnings {_TURN_WARNINGS}")
+    if getattr(RunConfig.__init__, "_strix_turn_warnings", False):
+        return
+
+    turns = {}  # model calls the root has made so far
+    started = time.monotonic()
+
+    def add_note(data):
+        context = data.context if isinstance(data.context, dict) else {}
+        if context.get("parent_id") is not None:
+            return data.model_data
+        agent_id = context.get("agent_id")
+        turns[agent_id] = turn = turns.get(agent_id, 0) + 1
+        late = time.monotonic() - started >= _CLOCK_WARNING_SECONDS
+        if turn < first and not late:
+            return data.model_data
+        if not _turn_warnings["sent"] and late and turn < first:
+            print(f"[shim] root agent warned at {_CLOCK_WARNING_SECONDS // 3600} h", flush=True)
+        _turn_warnings["sent"] = True
+        if turn in (first, last):
+            print(f"[shim] root agent warned at turn {turn} of {DEFAULT_MAX_TURNS}", flush=True)
+        running = _running_sub_agents(context)
+        names = ", ".join(running) if running else "the sub-agents you started (see view_agent_graph)"
+        if turn < first:
+            note = _CLOCK_NOTES[running != []].format(running=names)
+        else:
+            note = _NOTES["final" if turn >= last else "first", running != []].format(
+                left=max(DEFAULT_MAX_TURNS - turn, 0), running=names
+            )
+        return ModelInputData(
+            input=[*data.model_data.input, {"role": "user", "content": note}],
+            instructions=data.model_data.instructions,
+        )
+
+    init = RunConfig.__init__
+
+    @functools.wraps(init)
+    def with_warnings(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        if self.call_model_input_filter is None:
+            self.call_model_input_filter = add_note
+
+    with_warnings._strix_turn_warnings = True
+    RunConfig.__init__ = with_warnings
+
+
+def incomplete_after_warning(code):
+    """A root that was warned it was out of turns and then ended clean did not cover the target: report it as
+    incomplete (3), which the playbook fails and RiskPoint keeps only if findings were filed. Findings (2) and
+    crashes (1) keep their code."""
+    if _turn_warnings["sent"] and not code:
+        print(
+            "[shim] the root agent ran short of turns and filed no finding: "
+            "reporting the run as incomplete (exit 3)",
+            flush=True,
+        )
+        return 3
+    return code
+
+
 def install():
     sv, av = _versions()
     print(f"[shim] strix-agent={sv} openai-agents={av} -> backend=local", flush=True)
@@ -243,6 +386,9 @@ def install():
     # 6) A model call cut mid-response is retried (see retry_midstream_cuts).
     retry_midstream_cuts()
 
+    # 7) The root agent is warned before its turns run out (see warn_root_before_turn_cap).
+    warn_root_before_turn_cap()
+
     os.environ["STRIX_RUNTIME_BACKEND"] = "local"
 
 
@@ -272,11 +418,12 @@ def main():
         M.main()
     except SystemExit as e:
         print(f"[wrapper] strix exited with code: {e.code}")
-        return e.code
+        return incomplete_after_warning(e.code)
     except Exception:
         print("[wrapper] strix raised an exception:")
         traceback.print_exc()
         return 1
+    return incomplete_after_warning(0)
 
 
 if __name__ == "__main__":
