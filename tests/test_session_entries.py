@@ -7,6 +7,7 @@ import io
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -344,6 +345,7 @@ class _Session:
         self.exit_code = exit_code
         self.writes: list[tuple[Path, bytes]] = []
         self.execs: list[tuple[str, ...]] = []
+        self.state = SimpleNamespace(manifest=Manifest())
 
     async def resolve_exposed_port(self, _port: int) -> _Endpoint:
         return _Endpoint()

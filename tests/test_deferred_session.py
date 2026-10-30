@@ -10,6 +10,7 @@ import pytest
 from agents.run_config import SandboxRunConfig
 from agents.sandbox import SandboxAgent
 from agents.sandbox.capabilities import Filesystem, Shell
+from agents.sandbox.manifest import Manifest
 from agents.sandbox.runtime_session_manager import SandboxRuntimeSessionManager
 
 from strix.runtime import session_manager
@@ -50,7 +51,7 @@ class _ExecResult:
 
 class _State:
     def __init__(self) -> None:
-        self.manifest: Any = None
+        self.manifest: Any = Manifest()
         self.session_id = "00000000-0000-4000-8000-000000000001"
 
     def model_copy(self, *, update: dict[str, Any]) -> _State:

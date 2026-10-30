@@ -49,7 +49,6 @@ _PROTECTED_METADATA_NAMES = (".git", ".agents", ".codex")
 # Extra files travel as one tar archive: a single upload plus one extraction
 # inside the sandbox, instead of several round trips per file.
 _EXTRA_FILE_ARCHIVE_REL = ".strix-extra-files.tar"
-_EXTRA_FILE_ARCHIVE = f"{_WORKSPACE_ROOT}/{_EXTRA_FILE_ARCHIVE_REL}"
 _EXTRA_FILE_EXTRACT_TIMEOUT_S = 120
 _EXTRA_FILE_MODE = 0o644
 
@@ -221,19 +220,23 @@ def _validated_extra_file(
 
 
 async def stage_extra_files(session: BaseSandboxSession, archive: bytes) -> None:
-    """Upload ``archive`` and unpack it under ``/workspace`` as the sandbox user.
+    """Upload ``archive`` and unpack it under the session workspace as the sandbox user.
 
+    The workspace is ``/workspace`` in a container, but the local backend roots
+    each session in a fresh host directory, so both paths come from the session.
     ``--no-same-owner`` keeps ownership with the extracting user even where
     the session runs as root, so the agent user can always write the files.
     """
-    await session.write(Path(_EXTRA_FILE_ARCHIVE), io.BytesIO(archive))
+    root = str(session.state.manifest.root)
+    archive_path = f"{root.rstrip('/')}/{_EXTRA_FILE_ARCHIVE_REL}"
+    await session.write(Path(archive_path), io.BytesIO(archive))
     result = await session.exec(
         "sh",
         "-c",
         'tar --no-same-owner -xf "$1" -C "$2" && rm -f -- "$1"',
         "sh",
-        _EXTRA_FILE_ARCHIVE,
-        _WORKSPACE_ROOT,
+        archive_path,
+        root,
         timeout=_EXTRA_FILE_EXTRACT_TIMEOUT_S,
     )
     if not result.ok():
