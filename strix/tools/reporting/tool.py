@@ -13,6 +13,7 @@ import logging
 import re
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from agents import RunContextWrapper, function_tool
 
@@ -178,6 +179,30 @@ def _validate_required_text(fields: dict[str, str]) -> list[str]:
     return [
         msg for name, msg in _REQUIRED_FIELDS.items() if not str(fields.get(name) or "").strip()
     ]
+
+
+def _resolve_endpoint(
+    target: str, endpoint: str | None, *, has_code_locations: bool
+) -> tuple[str | None, str | None]:
+    """Return the finding's endpoint, or an error when a web finding names none.
+
+    Consumers locate, deduplicate and re-test findings by endpoint; a web
+    finding whose target is only the site root carries no location at all.
+    A target URL with a path supplies it; otherwise the caller must.
+    White-box findings locate themselves through ``code_locations``.
+    """
+    endpoint = clean_optional(endpoint)
+    if endpoint or has_code_locations:
+        return endpoint, None
+    parsed = urlsplit(str(target or "").strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None, None
+    if parsed.path not in ("", "/"):
+        return parsed.path + (f"?{parsed.query}" if parsed.query else ""), None
+    return None, (
+        "endpoint is required for a finding against a URL target: give the affected "
+        "path (e.g. /rest/user/login or /api/Users/:id), not just the site root"
+    )
 
 
 def _normalize_http_exchange_ids(raw: Any) -> tuple[list[str] | None, list[str]]:
@@ -843,6 +868,11 @@ async def _do_create(
     if parsed_locations:
         errors.extend(_validate_code_locations(parsed_locations))
     errors.extend(_validate_fix_verification(parsed_locations, fix_verification))
+    endpoint, endpoint_error = _resolve_endpoint(
+        target, endpoint, has_code_locations=bool(parsed_locations)
+    )
+    if endpoint_error:
+        errors.append(endpoint_error)
     cve, cwe, identifier_errors = _validate_identifiers(cve, cwe)
     errors.extend(identifier_errors)
     normalized_http_exchange_ids, http_exchange_errors = _normalize_http_exchange_ids(
@@ -1292,7 +1322,9 @@ async def create_vulnerability_report(
             critical").
         fix_effort: One of ``trivial`` / ``low`` / ``medium`` / ``high``.
         cvss_breakdown: 8-metric object per the format above.
-        endpoint: API path / Git path (e.g. ``/api/login``).
+        endpoint: API path / Git path (e.g. ``/api/login``). Required for a
+            finding against a URL target unless ``target`` itself carries
+            the path; a site-root target with no endpoint is rejected.
         method: HTTP method when relevant.
         cve: ``CVE-YYYY-NNNNN`` if certain, else omit.
         cwe: ``CWE-NNN`` (most specific child) if certain, else omit.

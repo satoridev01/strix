@@ -318,6 +318,40 @@ async def test_create_report_accepts_medium_confidence_with_rationale(
     assert report["confidence_rationale"] == "Static-only trace; could not stand up the service."
 
 
+async def test_web_finding_on_site_root_requires_an_endpoint(report_state: ReportState) -> None:
+    result = await _create_with(report_state, target="https://app.example.com/")
+    assert result["success"] is False
+    assert any("endpoint is required" in e for e in result["errors"])
+    assert not report_state.vulnerability_reports
+
+
+async def test_web_finding_endpoint_is_taken_from_the_target_path(
+    report_state: ReportState,
+) -> None:
+    result = await _create_with(
+        report_state, target="https://app.example.com/rest/products/search?q=x"
+    )
+    assert result["success"] is True
+    assert report_state.vulnerability_reports[0]["endpoint"] == "/rest/products/search?q=x"
+
+
+async def test_explicit_endpoint_is_kept_for_a_site_root_target(
+    report_state: ReportState,
+) -> None:
+    result = await _create_with(
+        report_state, target="https://app.example.com", endpoint="/rest/user/login"
+    )
+    assert result["success"] is True
+    assert report_state.vulnerability_reports[0]["endpoint"] == "/rest/user/login"
+
+
+def test_white_box_and_non_url_findings_do_not_need_an_endpoint() -> None:
+    resolve = reporting_tool._resolve_endpoint
+    assert resolve("https://app.example.com", None, has_code_locations=True) == (None, None)
+    assert resolve("repo/src/app.py", None, has_code_locations=False) == (None, None)
+    assert resolve("https://app.example.com", "None", has_code_locations=False)[1]
+
+
 async def test_dependency_report_sets_class_and_metadata(report_state: ReportState) -> None:
     result = await _do_create_dependency(
         title="CVE-2021-23337 in lodash 4.17.20",
