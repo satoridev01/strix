@@ -181,6 +181,39 @@ def _validate_required_text(fields: dict[str, str]) -> list[str]:
     ]
 
 
+_HTTP_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"})
+# "Negative Quantity in Basket" is a real finding; only the agent's own label for a test that
+# found nothing marks a non-finding.
+_NEGATIVE_RESULT = re.compile(r"\bnegative[\s-]+results?\b", re.IGNORECASE)
+
+
+def _is_web_finding(target: str, *, has_code_locations: bool) -> bool:
+    parsed = urlsplit(str(target or "").strip())
+    return not has_code_locations and parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+
+def _resolve_method(method: str | None, *, web_finding: bool) -> tuple[str | None, str | None]:
+    """Return the finding's HTTP method, or an error when a web finding names none."""
+    method = clean_optional(method)
+    if method:
+        method = method.strip().upper()
+    if not web_finding or method in _HTTP_METHODS:
+        return method, None
+    return None, (
+        "method is required for a finding against a URL target: the single HTTP verb of the "
+        f"request that demonstrates it, one of {sorted(_HTTP_METHODS)}"
+    )
+
+
+def _negative_result_error(title: str) -> str | None:
+    if not _NEGATIVE_RESULT.search(title or ""):
+        return None
+    return (
+        "a negative result is not a vulnerability: record what you tested and ruled out with "
+        "record_coverage (outcome no_issue_found or ruled_out) instead of filing a report"
+    )
+
+
 def _resolve_endpoint(
     target: str, endpoint: str | None, *, has_code_locations: bool
 ) -> tuple[str | None, str | None]:
@@ -873,6 +906,15 @@ async def _do_create(
     )
     if endpoint_error:
         errors.append(endpoint_error)
+    method, method_error = _resolve_method(
+        method,
+        web_finding=_is_web_finding(target, has_code_locations=bool(parsed_locations)),
+    )
+    if method_error:
+        errors.append(method_error)
+    negative_error = _negative_result_error(title)
+    if negative_error:
+        errors.append(negative_error)
     cve, cwe, identifier_errors = _validate_identifiers(cve, cwe)
     errors.extend(identifier_errors)
     normalized_http_exchange_ids, http_exchange_errors = _normalize_http_exchange_ids(
@@ -1058,6 +1100,10 @@ async def create_vulnerability_report(
       reconnaissance artifact is not by itself a vulnerability. File a
       report only when the PoC demonstrates an unauthorized security
       consequence or a realistic, fully validated path to one.
+    - Never file a negative result (a test that found nothing, a
+      hypothesis you could not exploit, a prior finding you could not
+      reproduce). Record it with ``record_coverage`` instead, with
+      outcome ``no_issue_found`` or ``ruled_out``.
     - Score only the reasonable final impact supported by the PoC. Do
       not score speculative pivots or consequences that require another
       unverified vulnerability.
@@ -1325,7 +1371,9 @@ async def create_vulnerability_report(
         endpoint: API path / Git path (e.g. ``/api/login``). Required for a
             finding against a URL target unless ``target`` itself carries
             the path; a site-root target with no endpoint is rejected.
-        method: HTTP method when relevant.
+        method: The HTTP verb of the request that demonstrates the finding
+            (``GET``, ``POST``, ``PUT``, ``PATCH``, ``DELETE``, ``HEAD`` or
+            ``OPTIONS``). Required for a finding against a URL target.
         cve: ``CVE-YYYY-NNNNN`` if certain, else omit.
         cwe: ``CWE-NNN`` (most specific child) if certain, else omit.
         code_locations: White-box findings — list of location objects.

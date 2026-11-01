@@ -329,7 +329,7 @@ async def test_web_finding_endpoint_is_taken_from_the_target_path(
     report_state: ReportState,
 ) -> None:
     result = await _create_with(
-        report_state, target="https://app.example.com/rest/products/search?q=x"
+        report_state, target="https://app.example.com/rest/products/search?q=x", method="GET"
     )
     assert result["success"] is True
     assert report_state.vulnerability_reports[0]["endpoint"] == "/rest/products/search?q=x"
@@ -339,10 +339,48 @@ async def test_explicit_endpoint_is_kept_for_a_site_root_target(
     report_state: ReportState,
 ) -> None:
     result = await _create_with(
-        report_state, target="https://app.example.com", endpoint="/rest/user/login"
+        report_state, target="https://app.example.com", endpoint="/rest/user/login", method="POST"
     )
     assert result["success"] is True
     assert report_state.vulnerability_reports[0]["endpoint"] == "/rest/user/login"
+
+
+async def test_web_finding_requires_one_http_method(report_state: ReportState) -> None:
+    for method in (None, "", "GET, POST", "FETCH"):
+        result = await _create_with(
+            report_state, target="https://app.example.com", endpoint="/api/Users", method=method
+        )
+        assert result["success"] is False
+        assert any("method is required" in e for e in result["errors"])
+    assert not report_state.vulnerability_reports
+
+
+async def test_web_finding_method_is_normalised(report_state: ReportState) -> None:
+    result = await _create_with(
+        report_state, target="https://app.example.com", endpoint="/api/Users", method="put"
+    )
+    assert result["success"] is True
+    assert report_state.vulnerability_reports[0]["method"] == "PUT"
+
+
+async def test_negative_results_are_not_filed_as_findings(report_state: ReportState) -> None:
+    for title in (
+        "Negative Result: Product Search SQL Injection (Search Parameter Not Exploitable)",
+        "Path Traversal on /ftp (negative-result: traversal collapses to SPA fallback)",
+    ):
+        result = await _create_with(report_state, title=title)
+        assert result["success"] is False
+        assert any("record_coverage" in e for e in result["errors"])
+    assert not report_state.vulnerability_reports
+
+
+async def test_a_negative_quantity_finding_is_not_mistaken_for_a_negative_result(
+    report_state: ReportState,
+) -> None:
+    result = await _create_with(
+        report_state, title="Negative Quantity in Basket Yields Negative Order Total"
+    )
+    assert result["success"] is True
 
 
 def test_white_box_and_non_url_findings_do_not_need_an_endpoint() -> None:
